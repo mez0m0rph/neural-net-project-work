@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from data import X, Y
 from sklearn.model_selection import LeaveOneOut
 
-# Исходные тензоры данных
 X_base = torch.tensor(X, dtype=torch.float32)
 Y_base = torch.tensor(Y, dtype=torch.float32)
 
@@ -24,14 +23,39 @@ for _ in range(3):
     X_list.append(X_noisy)
     Y_list.append(Y_noisy)
 
-X_tensor = torch.cat(X_list, dim=0)
-Y_tensor = torch.cat(Y_list, dim=0)
+X_noisy_total = torch.cat(X_list, dim=0)
+Y_noisy_total = torch.cat(Y_list, dim=0)
 
-# Физические границы 
-X_normal = torch.tensor([[0, 0], [200, 0.6]])
-Y_normal = torch.tensor([[0, 24], [15, 100]])
+X_apriori = torch.tensor([
+    [0.0, 0.0],  # нулевая скорость и нулевое давление = нет износа, температура не растет
+    [0.0, 0.1],  # нулевая скорость и любое давление = нет износа, температура тоже комнатная
+    [0.0, 0.3],
+    [0.0, 0.5],
+    [0.0, 0.6],
+    [60.0, 0.0],  # скорость есть, а давления нет = трения нет, износа не будет
+    [120.0, 0.0],
+    [180.0, 0.0],
+    [200.0, 0.0]
+], dtype=torch.float32)
 
-# Экстремумы диапазонов
+Y_apriori = torch.tensor([
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0],
+    [0.0, 23.0]
+], dtype=torch.float32)
+
+X_tensor = torch.cat([X_noisy_total, X_apriori], dim=0)
+Y_tensor = torch.cat([Y_noisy_total, Y_apriori], dim=0)
+
+X_normal = torch.tensor([[0.0, 0.0], [200.0, 0.6]])
+Y_normal = torch.tensor([[0.0, 24.0], [15.0, 100.0]])
+
 min_val_P_V = X_normal.min(dim=0).values
 min_val_WR_T = Y_normal.min(dim=0).values
 
@@ -45,8 +69,8 @@ Y_norm = ((Y_tensor - min_val_WR_T) / (max_val_WR_T - min_val_WR_T)) * 2 - 1
 class FrictionMLP(nn.Module):
     def __init__(self):
         super().__init__()
-        self.hidden = nn.Linear(2, 4)
-        self.output = nn.Linear(4, 2)
+        self.hidden = nn.Linear(2, 8)
+        self.output = nn.Linear(8, 2)
         self.activation = nn.Tanh()
 
     def forward(self, x):
@@ -57,7 +81,6 @@ class FrictionMLP(nn.Module):
         return final_res  
 
 
-# Универсальная функция train с поддержкой closure для LBFGS
 def train(model, optimizer, X, Y, criterion, epochs):
     loss_history = []
 
@@ -82,7 +105,6 @@ def train(model, optimizer, X, Y, criterion, epochs):
     return loss_history
 
 
-# Инициализация трех моделей (Adam, SGD, LBFGS)
 torch.manual_seed(42)
 model_adam = FrictionMLP()
 
@@ -96,11 +118,10 @@ criterion = nn.MSELoss()
 optimizer_adam = torch.optim.Adam(model_adam.parameters(), lr=0.01)
 optimizer_sgd = torch.optim.SGD(model_sgd.parameters(), lr=0.01)
 
-# Подключаем LBFGS (Метод Левенберга-Марквардта второго порядка)
 optimizer_lbfgs = torch.optim.LBFGS(model_lbfgs.parameters(), lr=0.1, line_search_fn='strong_wolfe')
 
-base_epochs = 500
-lbfgs_epochs = 20 # Исправлено: LBFGS сходится мгновенно, 30 эпох более чем достаточно
+base_epochs = 5000
+lbfgs_epochs = 20 
 
 loss_history_adam = train(model_adam, optimizer_adam, X_norm, Y_norm, criterion, base_epochs)
 loss_history_sgd = train(model_sgd, optimizer_sgd, X_norm, Y_norm, criterion, base_epochs)
@@ -111,7 +132,6 @@ def run_loocv(optimizer_class, lr, base_epochs):
     loo = LeaveOneOut()
     fold_losses = []
 
-    # Исправлено: Для LBFGS ставим 30 эпох, для остальных — 500, чтобы избежать зависания кода
     actual_epochs = 30 if optimizer_class == torch.optim.LBFGS else base_epochs
 
     for train_idx, val_idx in loo.split(X_norm):
@@ -139,7 +159,6 @@ def run_loocv(optimizer_class, lr, base_epochs):
 
     return fold_losses
 
-# Запуск валидации для трех алгоритмов
 losses_adam = run_loocv(torch.optim.Adam, lr=0.01, base_epochs=500)
 losses_sgd = run_loocv(torch.optim.SGD, lr=0.01, base_epochs=500)
 losses_lbfgs = run_loocv(torch.optim.LBFGS, lr=0.1, base_epochs=500)  
@@ -164,19 +183,13 @@ print("SGD mean val loss:", sum(losses_sgd) / len(losses_sgd))
 print("LBFGS mean val loss:", sum(losses_lbfgs) / len(losses_lbfgs))
 
 
-# Генерация сетки
-# ====================================================================
-# ГЕНЕРАЦИЯ СЕТКИ ПОЛНЫХ ФИЗИЧЕСКИХ ДИАПАЗОНОВ УСТАНОВКИ
-# ====================================================================
-# Настраиваем диапазоны сетки строго по новым требованиям руководителя
-V_range = np.linspace(0.0, 0.6, 100)  # Скорость от 0.0 до 0.6
-P_range = np.linspace(0.0, 200.0, 100)  # Давление от 0 до 200
+V_range = np.linspace(0.0, 0.6, 100)
+P_range = np.linspace(0.0, 200.0, 100)
 P_grid, V_grid = np.meshgrid(P_range, V_range)
 
 grid_points = np.column_stack([P_grid.ravel(), V_grid.ravel()])
 grid_tensor = torch.tensor(grid_points, dtype=torch.float32)
 
-# Нормализуем сетку в диапазон [-1, 1]
 grid_norm = (grid_tensor - min_val_P_V) / (max_val_P_V - min_val_P_V) * 2 - 1
 
 def predict_grid(model):
@@ -190,16 +203,13 @@ def predict_grid(model):
     T_pred = pred[:, 1].numpy().reshape(P_grid.shape)
     return WR_pred, T_pred
 
-# Получаем предсказания на полной сетке для трех моделей
 WR_adam, T_adam = predict_grid(model_adam)
 WR_sgd, T_sgd = predict_grid(model_sgd)
 WR_lbfgs, T_lbfgs = predict_grid(model_lbfgs)
 
-# Отрисовка трех контурных графиков (1 строка, 3 колонки)
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 models_data = zip(axes, [T_adam, T_sgd, T_lbfgs], [WR_adam, WR_sgd, WR_lbfgs], ['Adam', 'SGD', 'LBFGS (LM-style)'])
 
-# Жестко фиксируем шаги шкалы температур строго от 20 до 130 градусов
 levels_T = np.linspace(20.0, 130.0, 23)
 
 for ax, T_pred, WR_pred, title in models_data:
@@ -210,7 +220,6 @@ for ax, T_pred, WR_pred, title in models_data:
     ax.scatter(X_tensor[:, 0], X_tensor[:, 1],
                c='cyan', edgecolors='black', s=30, zorder=5, label='реальные эксперименты')
 
-    # Жестко фиксируем лимиты отображения осей на контурных картах
     ax.set_xlim(0, 200)
     ax.set_ylim(0, 0.6)
 
@@ -225,11 +234,7 @@ plt.savefig('combined_contour.png', dpi=150)
 plt.show()
 
 
-# ====================================================================
-# ПОСТРОЕНИЕ ГРАФИКОВ СЕЧЕНИЙ С ПОЛНОЙ ЭКСТРАПОЛЯЦИЕЙ (P = 120)
-# ====================================================================
 P_fixed = 120.0
-# Скорость для сечения теперь идет от 0.0 до 0.6 для красивой экстраполяции
 V_slice = np.linspace(0.0, 0.6, 100)  
 
 slice_points = np.column_stack([np.full_like(V_slice, P_fixed), V_slice])
@@ -244,19 +249,16 @@ def predict_slice(model):
     pred = ((pred_norm + 1) / 2) * (max_val_WR_T - min_val_WR_T) + min_val_WR_T
     return pred[:, 0].numpy(), pred[:, 1].numpy()
 
-# Считаем кривые сечений для трех алгоритмов
 WR_slice_adam, T_slice_adam = predict_slice(model_adam)
 WR_slice_sgd, T_slice_sgd = predict_slice(model_sgd)
 WR_slice_lbfgs, T_slice_lbfgs = predict_slice(model_lbfgs)
 
-# Экспериментальные точки (вручную для P=120)
 V_real_exact = np.array([0.1, 0.2, 0.3, 0.5])
 WR_real_exact = np.array([8.66348444, 1.8, 1.81686222, 1.62854222])
 T_real_exact = np.array([34.0, 38.0, 43.0, 52.0])
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-# Левый график сечения (Износ, Wear Rate) с линией LBFGS
 ax1.plot(V_slice, WR_slice_adam, 'r-', linewidth=2, label='Adam (прогноз)')
 ax1.plot(V_slice, WR_slice_sgd, 'b--', linewidth=2, label='SGD (прогноз)')
 ax1.plot(V_slice, WR_slice_lbfgs, 'g-.', linewidth=2, label='LBFGS (прогноз)') 
@@ -269,7 +271,6 @@ ax1.set_title(f'Зависимость износа от скорости при
 ax1.grid(True, linestyle=':', alpha=0.6)
 ax1.legend()
 
-# Правый график сечения (Температура, Temperature) с линией LBFGS
 ax2.plot(V_slice, T_slice_adam, 'r-', linewidth=2, label='Adam (прогноз)')
 ax2.plot(V_slice, T_slice_sgd, 'b--', linewidth=2, label='SGD (прогноз)')
 ax2.plot(V_slice, T_slice_lbfgs, 'g-.', linewidth=2, label='LBFGS (прогноз)') 
@@ -282,12 +283,11 @@ ax2.set_title(f'Зависимость температуры от скорос�
 ax2.grid(True, linestyle=':', alpha=0.6)
 ax2.legend()
 
-# ИСПРАВЛЕНИЕ ЖЕСТКИХ ЛИМИТОВ ОТОБРАЖЕНИЯ ОСЕЙ СЕЧЕНИЙ
 ax1.set_xlim(0.0, 0.6)
-ax1.set_ylim(0.0, 12.0)  # Износ виден идеально без смещений и пропаданий
+ax1.set_ylim(0.0, 12.0)
 
 ax2.set_xlim(0.0, 0.6)
-ax2.set_ylim(20.0, 130.0)  # Температура строго от 20 до 130 градусов
+ax2.set_ylim(20.0, 130.0)
 
 plt.tight_layout()
 plt.savefig('frictional_slice_120.png', dpi=150)
