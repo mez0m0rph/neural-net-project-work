@@ -183,12 +183,15 @@ print("SGD mean val loss:", sum(losses_sgd) / len(losses_sgd))
 print("LBFGS mean val loss:", sum(losses_lbfgs) / len(losses_lbfgs))
 
 
-V_range = np.linspace(0.0, 0.6, 100)
+V_range = np.linspace(0.0, 0.6, 100)  # генерация точек для теста нейросети
 P_range = np.linspace(0.0, 200.0, 100)
-P_grid, V_grid = np.meshgrid(P_range, V_range)
+P_grid, V_grid = np.meshgrid(P_range, V_range)  # матрица для всех пар входных значений (на них будем прогнозировать)
 
-grid_points = np.column_stack([P_grid.ravel(), V_grid.ravel()])
-grid_tensor = torch.tensor(grid_points, dtype=torch.float32)
+grid_points = np.column_stack([P_grid.ravel(), V_grid.ravel()])  # один список из всех входных пар (10.000 значений)
+grid_tensor = torch.tensor(grid_points, dtype=torch.float32)  # перевод списка в тензор для нейронки
+
+# создали "виртуальную карту" из 10.000 точек, покрывающих весь диапазон параметров материала
+
 
 grid_norm = (grid_tensor - min_val_P_V) / (max_val_P_V - min_val_P_V) * 2 - 1
 
