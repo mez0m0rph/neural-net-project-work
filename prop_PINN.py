@@ -2,12 +2,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from sklearn.metrics import r2_score
-import prop_data_2 as data_prop
 import numpy as np
-
+from sklearn.model_selection import LeaveOneOut
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import prop_data_2_lg as data_prop
 import random
 import os
+import sys
 
 random.seed(42)
 os.environ['PYTHONHASHSEED'] = str(42)
@@ -19,89 +20,189 @@ if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
 X, Y = data_prop.get_pytorch_data(device)
+X = X.to(device)
+Y = Y.to(device)
 
-X_train, Y_train = X[:12], Y[:12]
-X_val, Y_val = X[12:], Y[12:]
+X_np = X.cpu().numpy()
+Y_np = Y.cpu().numpy()
 
-class HardConstrainedPINN(nn.Module):
+X_phys = data_prop.get_physics_point(1000).to(device)
+
+loo = LeaveOneOut()
+
+y_true_all = []
+y_pred_all = []
+
+class AdvancedPINN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(2, 16)
-        self.fc2 = nn.Linear(16, 16)
-        self.output = nn.Linear(16, 4)
-        self.tanh = nn.Tanh()
-        self.dropout = nn.Dropout(0.2)
+        self.network = nn.Sequential(
+            nn.Linear(2, 32),
+            nn.SiLU(),
+            nn.Linear(32, 32),
+            nn.SiLU(),
+            nn.Linear(32, 4)
+        )
         
     def forward(self, x):
-        identity = x
-        
-        h = self.fc1(x)
-        h = self.tanh(h)
-        h = self.dropout(h)
-        
-        h = self.fc2(h)
-        h = self.tanh(h)
-        h = self.dropout(h)
-        
-        raw_out = self.output(h)
-        
-        E_constrained = torch.abs(raw_out[:, 0:1]) * identity[:, 0:1] + raw_out[:, 0:1]
-        UTS_constrained = torch.abs(raw_out[:, 1:2]) * identity[:, 0:1] + raw_out[:, 1:2]
-        Elong_constrained = raw_out[:, 2:3]
-        Yield_constrained = torch.abs(raw_out[:, 3:4]) * identity[:, 0:1] + raw_out[:, 3:4]
-        
-        return torch.cat([E_constrained, UTS_constrained, Elong_constrained, Yield_constrained], dim=1)
+        return self.network(x)
 
-model = HardConstrainedPINN().to(device)
+total_folds = X_np.shape[0]
+print(f"Starting PINN LOOCV validation on {device}... Total iterations: {total_folds}")
 
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.005, weight_decay=1e-3)
-
-history_train_loss = []
-history_val_loss = []
-
-epochs = 2000
-
-for epoch in range(1, epochs + 1):
-    model.train()
-    optimizer.zero_grad()
+for fold, (train_idx, val_idx) in enumerate(loo.split(X_np)):
+    x_train_t = X[train_idx].to(device)
+    y_train_t = Y[train_idx].to(device)
+    x_val_t = X[val_idx].to(device)
+    y_val_t = Y[val_idx].to(device)
     
-    predictions = model(X_train)
-    loss_data = criterion(predictions, Y_train)
+    model = AdvancedPINN().to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.005, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=200)
     
-    loss_data.backward()
-    optimizer.step()
-    
+    epochs = 2000
+    for epoch in range(1, epochs + 1):
+        model.train()
+        optimizer.zero_grad()
+        
+        predictions = model(x_train_t)
+        loss_data = criterion(predictions, y_train_t)
+        
+        X_phys.requires_grad_(True)
+        pred_phys = model(X_phys)
+        E_pred = pred_phys[:, 0]
+        UTS_pred = pred_phys[:, 1]
+        
+        grad_E = torch.autograd.grad(
+            outputs=E_pred,
+            inputs=X_phys,
+            grad_outputs=torch.ones_like(E_pred).to(device),
+            create_graph=True
+        )[0]
+        
+        grad_UTS = torch.autograd.grad(
+            outputs=UTS_pred,
+            inputs=X_phys,
+            grad_outputs=torch.ones_like(UTS_pred).to(device),
+            create_graph=True
+        )[0]
+        
+        dE_dWcf = grad_E[:, 0]
+        dE_dlcf = grad_E[:, 1]
+        dUTS_dWcf = grad_UTS[:, 0]
+        dUTS_dlcf = grad_UTS[:, 1]
+        
+        loss_physics = (
+            torch.mean(torch.relu(-dE_dWcf)) +
+            torch.mean(torch.relu(-dE_dlcf)) +
+            torch.mean(torch.relu(-dUTS_dWcf)) +
+            torch.mean(torch.relu(-dUTS_dlcf))
+        )
+        
+        lambda_p = min(0.5, 0.01 * (epoch / 100))
+        total_loss = loss_data + lambda_p * loss_physics
+        total_loss.backward()
+        optimizer.step()
+        
+        model.eval()
+        with torch.no_grad():
+            val_predictions = model(x_val_t)
+            val_loss = criterion(val_predictions, y_val_t)
+            
+        scheduler.step(val_loss)
+        
     model.eval()
     with torch.no_grad():
-        val_predictions = model(X_val)
-        val_loss = criterion(val_predictions, Y_val)
+        val_pred = model(x_val_t).cpu().numpy()
         
-    history_train_loss.append(loss_data.item())
-    history_val_loss.append(val_loss.item())
+    y_true_all.append(Y_np[val_idx])
+    y_pred_all.append(val_pred)
     
-    if epoch % 400 == 0 or epoch == 1:
-        print(f"Epoch {epoch:4d}/{epochs} | Train Loss: {loss_data.item():.5f} | Val Loss: {val_loss.item():.5f}")
+    if (fold + 1) % 5 == 0 or (fold + 1) == total_folds:
+        print(f"Processed samples: {fold + 1}/{total_folds}...")
 
-model.eval()
-with torch.no_grad():
-    final_pred = model(X_val)
-    y_true = Y_val.cpu().numpy()
-    y_pred = final_pred.cpu().numpy()
-    final_r2 = r2_score(y_true, y_pred)
-    print(f"\nFinal Hard-PINN Val R2 Score: {final_r2:.4f}")
+y_true_all = np.array(y_true_all).squeeze(1)
+y_pred_all = np.array(y_pred_all).squeeze(1)
+
+final_pikan_r2 = r2_score(y_true_all, y_pred_all, multioutput='uniform_average')
+
+if final_pikan_r2 > 0.60:
+    print("Training final model on 100% of data...")
+    final_model = AdvancedPINN().to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(final_model.parameters(), lr=0.005, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=200)
+    
+    epochs = 2000
+    for epoch in range(1, epochs + 1):
+        final_model.train()
+        optimizer.zero_grad()
+        predictions = final_model(X)
+        loss_data = criterion(predictions, Y)
+        
+        X_phys.requires_grad_(True)
+        pred_phys = final_model(X_phys)
+        grad_E = torch.autograd.grad(outputs=pred_phys[:, 0], inputs=X_phys, grad_outputs=torch.ones_like(pred_phys[:, 0]).to(device), create_graph=True)[0]
+        grad_UTS = torch.autograd.grad(outputs=pred_phys[:, 1], inputs=X_phys, grad_outputs=torch.ones_like(pred_phys[:, 1]).to(device), create_graph=True)[0]
+        loss_physics = (
+            torch.mean(torch.relu(-grad_E[:, 0])) + torch.mean(torch.relu(-grad_E[:, 1])) +
+            torch.mean(torch.relu(-grad_UTS[:, 0])) + torch.mean(torch.relu(-grad_UTS[:, 1]))
+        )
+        lambda_p = min(0.5, 0.01 * (epoch / 100))
+        total_loss = loss_data + lambda_p * loss_physics
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step(loss_data)
+        
+    if not os.path.exists('./best_model'):
+        os.makedirs('./best_model')
+    torch.save(final_model.state_dict(), './best_model/best_pinn_model.pth')
+
+if hasattr(data_prop, 'scaler_y'):
+    y_true_real = data_prop.scaler_y.inverse_transform(y_true_all)
+    y_pred_real = data_prop.scaler_y.inverse_transform(y_pred_all)
+else:
+    if hasattr(data_prop, 'get_raw_data'):
+        _, Y_raw = data_prop.get_raw_data()
+        y_min = Y_raw.min(axis=0)
+        y_max = Y_raw.max(axis=0)
+    else:
+        y_min = np.array([2.0, 50.0, 1.0, 40.0])   
+        y_max = np.array([15.0, 180.0, 30.0, 140.0]) 
+    y_true_real = 0.5 * (y_true_all + 1) * (y_max - y_min) + y_min
+    y_pred_real = 0.5 * (y_pred_all + 1) * (y_max - y_min) + y_min
+
+units = ['GPa', 'MPa', '%', 'MPa']
+property_names = ['Young Modulus', 'UTS', 'Elongation', 'Yield Strength']
+
+print("\n" + "="*95)
+print("                               PINN LOOCV VALIDATION METRICS RESULTS")
+print("===============================================================================================")
+print(f"Overall Multioutput PINN LOOCV R2 Score: {final_pikan_r2:.4f}")
+print("-"*95)
+
+for i, name in enumerate(property_names):
+    r2 = r2_score(y_true_real[:, i], y_pred_real[:, i])
+    mae = mean_absolute_error(y_true_real[:, i], y_pred_real[:, i])
+    rmse = np.sqrt(mean_squared_error(y_true_real[:, i], y_pred_real[:, i]))
+    mape = np.mean(np.abs((y_true_real[:, i] - y_pred_real[:, i]) / y_true_real[:, i])) * 100
+    print(f"Property: {name:<15} | R2: {r2:>7.4f} | MAE: {mae:>7.2f} {units[i]:<3} | RMSE: {rmse:>7.2f} {units[i]:<3} | MAPE: {mape:>6.2f}%")
+print("=" * 95)
 
 plt.figure(figsize=(10, 5))
-plt.plot(history_train_loss, label='Train Loss')
-plt.plot(history_val_loss, label='Val Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Hard-PINN Training History')
+for i, name in enumerate(property_names):
+    plt.scatter(y_true_real[:, i], y_pred_real[:, i], alpha=0.7, label=f"{name} ({units[i]})")
+min_val = min(y_true_real.min(), y_pred_real.min())
+max_val = max(y_true_real.max(), y_pred_real.max())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Prediction')
+plt.xlabel('Experimental True (Physical Units)')
+plt.ylabel('PINN Predicted (Physical Units)')
+plt.title('PINN LOOCV True vs Predicted Values (Real Scales)')
 plt.legend()
 plt.grid(True)
 plt.show()

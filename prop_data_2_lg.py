@@ -40,11 +40,11 @@ Y_base = np.array([
 
 X_synth = []
 Y_synth = []
-synthetic_cf = [10.0, 20.0, 30.0, 40.0, 50.0]
+synthetic_lengths = [0.2, 0.5, 1.0, 3.0]
 
-for cf in synthetic_cf:
+for length in synthetic_lengths:
     for i in range(3):
-        X_synth.append([cf, 0.0])
+        X_synth.append([0.0, length])
         Y_synth.append(Y_base[i].tolist())
 
 X_raw = np.vstack([X_base, np.array(X_synth, dtype=np.float32)])

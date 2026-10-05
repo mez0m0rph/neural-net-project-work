@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from kan import KAN
 from sklearn.model_selection import LeaveOneOut
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-import prop_data_2 as data_prop
+import prop_data_2_lg as data_prop
 import os
 import sys
 
