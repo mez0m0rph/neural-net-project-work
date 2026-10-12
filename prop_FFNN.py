@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import LeaveOneOut
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-import prop_data_2_lg as data_prop
+import prop_data_2_lg_real as data_prop
 import os
 import sys
 import random
