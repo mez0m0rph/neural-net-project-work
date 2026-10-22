@@ -101,7 +101,7 @@ units = ['GPa', 'MPa', '%', 'MPa']
 property_names = ['Young Modulus', 'UTS', 'Elongation', 'Yield Strength']
 
 print("\n" + "="*95)
-print("                               LOOCV VALIDATION METRICS RESULTS")
+print("                           KAN LOOCV VALIDATION METRICS RESULTS")
 print("===============================================================================================")
 print(f"Overall Multioutput LOOCV R2 Score: {final_loocv_r2:.4f}")
 print("-"*95)
